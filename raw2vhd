@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+import struct
+import sys
+import os
+
+def make_vhd_footer(size):
+    cookie = b'conectix'
+    features = 0x00000002
+    version = 0x00010000
+    data_offset = 0xFFFFFFFFFFFFFFFF  # fixed disk
+    timestamp = 0
+    creator_app = b'qemu'
+    creator_ver = 0x00010000
+    creator_os = 0x5769326B  # Wi2k (Windows)
+    original_size = size
+    current_size = size
+    
+    # Geometry (CHS)
+    cylinders = min(size // (16 * 63 * 512), 65535)
+    heads = 16
+    sectors = 63
+    
+    disk_type = 2  # Fixed
+    
+    # Build footer without checksum
+    footer = struct.pack('>8sIIQI4sII',
+        cookie, features, version, data_offset, timestamp,
+        creator_app, creator_ver, creator_os)
+    footer += struct.pack('>QQHBB', original_size, current_size, cylinders, heads, sectors)
+    footer += struct.pack('>I', disk_type)
+    footer += struct.pack('>I', 0)  # checksum placeholder
+    footer += os.urandom(16)  # UUID
+    footer += b'\x00'  # saved state
+    footer += b'\x00' * 427  # padding to 512
+    
+    # Calculate checksum
+    checksum = 0
+    for b in footer:
+        checksum = (checksum + b) & 0xFFFFFFFF
+    checksum = ~checksum & 0xFFFFFFFF
+    
+    # Repack with correct checksum
+    footer = footer[:64] + struct.pack('>I', checksum) + footer[68:]
+    
+    return footer
+
+if __name__ == '__main__':
+    raw_file = sys.argv[1]
+    size = os.path.getsize(raw_file)
+    
+    with open(raw_file, 'ab') as f:
+        f.write(make_vhd_footer(size))

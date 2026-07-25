@@ -1,0 +1,11 @@
+set -eu
+grep -q 'apparmor=0' /etc/default/grub ||
+  sed -i 's/consoleblank=0/consoleblank=0 apparmor=0/' /etc/default/grub
+grep -q GRUB_DISABLE_OS_PROBER /etc/default/grub ||
+  echo 'GRUB_DISABLE_OS_PROBER=true' >> /etc/default/grub
+printf '%s\n' \
+  crc32c loop ahci sd_mod xhci_hcd ext4 nls_cp437 nls_ascii \
+  vfat ntfs3 uas nvme virtio virtio_pci virtio_blk \
+  > /etc/initramfs-tools/modules
+update-grub
+update-initramfs -u -k all

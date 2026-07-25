@@ -1,0 +1,8 @@
+*.o
+*.tar.gz
+*.vhd
+*.raw
+*.efi
+*.cpio
+esp
+fs

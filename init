@@ -1,0 +1,50 @@
+#!/lnc/busybox sh
+TARGET_NTFSID="DEADBEEFCAFEBABE"
+TARGET_PATH=/boot/media/debian.vhd
+to_upper() {
+    echo "$1" | /lnc/busybox sed 'y/abcdefghijklmnopqrstuvwxyz/ABCDEFGHIJKLMNOPQRSTUVWXYZ/'
+}
+ntfsid_builtin() {
+    /lnc/busybox dd if="$1" bs=1 skip=72 count=8 2>/dev/null | /lnc/busybox hexdump -e '8/1 "%02x"' | /lnc/busybox sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\8\7\6\5\4\3\2\1/'
+}
+exec >/dev/console 2>&1
+mkdir -p /lnc_boot
+mkdir -p /lnc_rofs
+mkdir -p /lnc_disk
+/lnc/busybox mount -t devtmpfs devtmpfs /dev
+/lnc/busybox mount -t proc proc /proc
+/lnc/busybox mount -t sysfs sysfs /sys
+/lnc/busybox modprobe crc32c
+/lnc/busybox modprobe loop
+/lnc/busybox modprobe ahci
+/lnc/busybox modprobe sd_mod
+/lnc/busybox modprobe xhci_hcd
+/lnc/busybox modprobe ext4
+/lnc/busybox modprobe nls_cp437
+/lnc/busybox modprobe nls_ascii
+/lnc/busybox modprobe vfat
+/lnc/busybox modprobe ntfs3
+/lnc/busybox modprobe uas
+/lnc/busybox modprobe nvme
+/lnc/busybox modprobe virtio
+/lnc/busybox modprobe virtio_pci
+/lnc/busybox modprobe virtio_blk
+for i in $(/lnc/busybox seq 1 10); do
+    /lnc/busybox ls /dev
+    for dev in /dev/*; do
+        [ -b "$dev" ] || continue
+        id=$(ntfsid_builtin "$dev" 2>/dev/null)
+        if [ "$(to_upper "$id")" = "$(to_upper "$TARGET_NTFSID")" ]; then
+            /lnc/busybox mount -t ntfs3 -o force "$dev" /lnc_disk
+            break 2
+        fi
+    done
+    /lnc/busybox sleep 1
+done
+/lnc/busybox losetup -fP /lnc_disk$TARGET_PATH
+/lnc/setdio /dev/loop0
+[ -f /lnc/bootstrap ] || exec /init "$@"
+/lnc/busybox mount -t vfat /dev/loop0p15 /lnc_boot
+/lnc/busybox mount -t ext4 $(/lnc/busybox blkid | /lnc/busybox grep $(/lnc/busybox grep 'search.fs_uuid' /lnc_boot/EFI/debian/grub.cfg | /lnc/busybox awk '{print $2}') | /lnc/busybox awk '{print $1}' | /lnc/busybox sed 's/.$//') /lnc_rofs
+/lnc/busybox sh -c "/lnc/bootstrap /lnc_rofs/boot/grub/grub.cfg" </dev/console >/dev/console 2>&1
+/lnc/busybox setsid -c sh -c 'exec /lnc/busybox sh </dev/ttyS0 >/dev/ttyS0 2>&1'

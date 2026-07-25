@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+import mmap
+import sys
+
+def unescape(s: str) -> bytes:
+    return s.encode("latin-1", "backslashreplace").decode("unicode_escape").encode("latin-1")
+
+def fit(replacement: bytes, width: int) -> bytes:
+    if len(replacement) < width:
+        return replacement + b"\x00" * (width - len(replacement))
+    return replacement[:width]
+
+def main(argv):
+    path, find, repl = argv[1], unescape(argv[2]), unescape(argv[3])
+
+    repl = fit(repl, len(find))
+
+    try:
+        f = open(path, "r+b")
+    except OSError as e:
+        sys.stderr.write("error: cannot open {}: {}\n".format(path, e))
+        return 2
+
+    count = 0
+    with f:
+        m = mmap.mmap(f.fileno(), 0)
+        try:
+            i = 0
+            while (i := m.find(find, i)) != -1:
+                m[i:i + len(find)] = repl
+                i += len(find)
+                count += 1
+            m.flush()
+        finally:
+            m.close()
+
+    return 0 if count else 1
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
