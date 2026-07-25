@@ -4,7 +4,7 @@ all: qemu
 
 .PHONY: qemu
 qemu: cache/disk.raw esp/EFI/BOOT/BOOTx64.EFI
-	qemu-system-x86_64 -m 1024 \
+	@setsid -w -c qemu-system-x86_64 -m 1024 \
 		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
 		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_VARS_4M.fd \
 		-drive format=raw,file=fat:rw:esp \
@@ -121,10 +121,6 @@ deps:
 clean:
 	umount -R mnt || true
 	make -C bootstrap clean
-	rm -rf fs init.cpio esp uki mnt
-
-.PHONY: clean-all
-clean-all: clean
-	rm -rf cache
+	rm -rf fs init.cpio esp uki mnt cache
 
 FORCE: ;
