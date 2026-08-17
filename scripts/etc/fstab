@@ -1,0 +1,4 @@
+PARTUUID=5e13838f-c36e-43a8-bf66-739ffd46d6c4 / ext4 rw,discard,errors=remount-ro,x-systemd.growfs 0 1
+PARTUUID=b13e2f6c-573a-4535-817c-53eaffbbda0f /boot/efi vfat defaults,umask=077 0 2
+/dev/mapper/root /root ext4 loop,offset=1048576,rw,relatime,x-systemd.device-timeout=10s 0 2
+/dev/mapper/work /work ext4 loop,offset=104857600,rw,relatime,x-systemd.device-timeout=10s 0 2
