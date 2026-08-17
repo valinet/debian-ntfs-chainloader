@@ -45,8 +45,13 @@ def make_vhd_footer(size):
     return footer
 
 if __name__ == '__main__':
+    if sys.argv[1] == '-e':
+        # emit a footer for an explicit disk size to stdout, don't touch a file
+        sys.stdout.buffer.write(make_vhd_footer(int(sys.argv[2])))
+        sys.exit(0)
+
     raw_file = sys.argv[1]
     size = os.path.getsize(raw_file)
-    
+
     with open(raw_file, 'ab') as f:
         f.write(make_vhd_footer(size))

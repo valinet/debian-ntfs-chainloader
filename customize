@@ -5,7 +5,7 @@ grep -q GRUB_DISABLE_OS_PROBER /etc/default/grub ||
   echo 'GRUB_DISABLE_OS_PROBER=true' >> /etc/default/grub
 printf '%s\n' \
   crc32c loop ahci sd_mod xhci_hcd ext4 nls_cp437 nls_ascii \
-  vfat ntfs3 uas nvme virtio virtio_pci virtio_blk \
+  vfat ntfs3 uas nvme virtio virtio_pci virtio_blk dm_mod \
   > /etc/initramfs-tools/modules
 update-grub
 update-initramfs -u -k all

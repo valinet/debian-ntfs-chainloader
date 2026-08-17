@@ -29,19 +29,24 @@ mkdir -p /lnc_disk
 /lnc/busybox modprobe virtio
 /lnc/busybox modprobe virtio_pci
 /lnc/busybox modprobe virtio_blk
+/lnc/busybox modprobe dm_mod
 for i in $(/lnc/busybox seq 1 10); do
     /lnc/busybox ls /dev
     for dev in /dev/*; do
         [ -b "$dev" ] || continue
         id=$(ntfsid_builtin "$dev" 2>/dev/null)
         if [ "$(to_upper "$id")" = "$(to_upper "$TARGET_NTFSID")" ]; then
-            /lnc/busybox mount -t ntfs3 -o force "$dev" /lnc_disk
+            NTFS_DEV="$dev"
+            /lnc/busybox mount -t ntfs3 -o ro,force "$dev" /lnc_disk
             break 2
         fi
     done
     /lnc/busybox sleep 1
 done
-/lnc/busybox losetup -fP /lnc_disk$TARGET_PATH
+/lnc/dmimage /lnc_disk "$NTFS_DEV" /lnc_disk$TARGET_PATH debian \
+    || exec /lnc/busybox sh
+/lnc/busybox hexdump -s 510 -n 2 -e '2/1 "%02x"' /dev/mapper/debian | /lnc/busybox grep -qi '55aa' || exec /lnc/busybox sh
+/lnc/busybox losetup -fP /dev/mapper/debian
 /lnc/setdio /dev/loop0
 [ -f /lnc/bootstrap ] || exec /init "$@"
 /lnc/busybox mount -t vfat /dev/loop0p15 /lnc_boot

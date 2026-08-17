@@ -12,6 +12,11 @@
 .global sys_munmap
 .global sys_fstat
 .global sys_fsync
+.global sys_mknod
+.global sys_ioctl
+.global sys_lseek
+.global sys_exit
+.global sys_umount2
 .global _start
 
 .text
@@ -80,5 +85,30 @@ sys_fstat:
 
 sys_fsync:
     mov rax, 74
+    syscall
+    ret
+
+sys_mknod:
+    mov rax, 133
+    syscall
+    ret
+
+sys_ioctl:
+    mov rax, 16
+    syscall
+    ret
+
+sys_lseek:
+    mov rax, 8
+    syscall
+    ret
+
+sys_exit:
+    mov rax, 60
+    syscall
+    ret
+
+sys_umount2:
+    mov rax, 166
     syscall
     ret

@@ -459,6 +459,7 @@ static size_t build_loop_setup_cpio(void *buf) {
     pos += emit_host_file(p + pos, "lnc/musl.so", "/lnc/musl.so");
     pos += emit_host_file(p + pos, "lnc/busybox", "/lnc/busybox");
     pos += emit_host_file(p + pos, "lnc/setdio", "/lnc/setdio");
+    pos += emit_host_file(p + pos, "lnc/dmimage", "/lnc/dmimage");
     pos += cpio_emit(p + pos, "TRAILER!!!", NULL, 0, CPIO_MODE_FILE);
 
     return pos;

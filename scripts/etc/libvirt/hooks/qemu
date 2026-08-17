@@ -1,0 +1,58 @@
+#!/bin/bash
+VM="$1"; OP="$2"
+[ "$VM" = "console" ] || exit 0
+
+GROUPMATES="0000:00:1f.0 0000:00:1f.4 0000:00:1f.5"
+GUEST=192.168.122.2
+DISK=/dev/nvme0n1
+
+case "$OP" in
+  prepare)
+    # Whole-disk loop. dm can't claim /dev/nvme0n1 directly while the images
+    # hold nvme0n1p1 (BLK_OPEN_EXCL claim walks up to the whole disk), but
+    # losetup opens it non-exclusively.
+    LOOPDISK=$(losetup -f --show --direct-io=on "$DISK") || exit 1
+
+    /usr/local/sbin/guestdisk-table > /run/guestdisk.raw || {
+      losetup -d "$LOOPDISK"; exit 1; }
+    sed "s| linear $DISK | linear $LOOPDISK |" /run/guestdisk.raw > /run/guestdisk.table
+
+    # refuse to start with a table that protects nothing
+    awk '$3=="error"{s+=$2} END{exit !(s>0)}' /run/guestdisk.table || {
+      echo "hook: guestdisk table has no error targets" >&2
+      losetup -d "$LOOPDISK"; exit 1; }
+
+    dmsetup create guestdisk /run/guestdisk.table || {
+      losetup -d "$LOOPDISK"; exit 1; }
+
+    iptables -t nat -A PREROUTING -m addrtype --dst-type LOCAL -p tcp --dport 3389 \
+      -j DNAT --to-destination $GUEST:3389
+    iptables -I FORWARD 1 -p tcp -d $GUEST --dport 3389 -m conntrack --ctstate NEW -j ACCEPT
+
+    for d in $GROUPMATES; do
+      echo vfio-pci > /sys/bus/pci/devices/$d/driver_override
+      [ -e /sys/bus/pci/devices/$d/driver ] && echo $d > /sys/bus/pci/devices/$d/driver/unbind
+      echo $d > /sys/bus/pci/drivers_probe
+    done
+    ;;
+
+  release)
+    for d in $GROUPMATES; do
+      echo > /sys/bus/pci/devices/$d/driver_override
+      [ -e /sys/bus/pci/devices/$d/driver ] && echo $d > /sys/bus/pci/devices/$d/driver/unbind
+      echo $d > /sys/bus/pci/drivers_probe
+    done
+
+    iptables -t nat -D PREROUTING -m addrtype --dst-type LOCAL -p tcp --dport 3389 \
+      -j DNAT --to-destination $GUEST:3389
+    iptables -D FORWARD -p tcp -d $GUEST --dport 3389 -m conntrack --ctstate NEW -j ACCEPT
+
+    dmsetup remove guestdisk 2>/dev/null
+    for l in $(losetup -j "$DISK" -O NAME -n); do
+      losetup -d "$l" 2>/dev/null
+    done
+    rm -f /run/guestdisk.raw /run/guestdisk.table
+    ;;
+esac
+exit 0
+

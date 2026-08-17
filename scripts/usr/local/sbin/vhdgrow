@@ -1,0 +1,237 @@
+#!/bin/bash
+# vhdgrow <dm-name> <size>     extend by size, e.g. vhdgrow sbos 4G
+# vhdgrow <dm-name> =<size>    extend to an absolute size
+# vhdgrow <dm-name> --verify   check the live mapping against the file's extents
+set -euo pipefail
+
+CONF=/etc/vhdimages.conf
+DOMAIN=console
+WINHOST=user@console
+WINVOL=C:
+RAW2VHD=/usr/local/sbin/raw2vhd
+BIN=/dev/shm/vhdgrow.bin
+
+die() { echo "vhdgrow: $*" >&2; exit 1; }
+resolve() { case "$1" in /dev/*) echo "$1" ;;
+	*) echo "/dev/$(basename "$(readlink -f "/sys/dev/block/$1")")" ;; esac; }
+
+if [ "${VHDGROW_STAGED:-}" != 1 ]; then
+	mkdir -p "$BIN"
+	cp -f "$0" "$BIN/vhdgrow"
+	cp -f "$(command -v dmsetup)" "$BIN/"
+	ldd "$(command -v dmsetup)" | awk '/=>/ {print $3}' | xargs -r cp -t "$BIN/"
+	export VHDGROW_STAGED=1 LD_LIBRARY_PATH="$BIN"
+	exec "$BIN/vhdgrow" "$@"
+fi
+DMS="$BIN/dmsetup"
+
+STAGE=$(mktemp -d /dev/shm/vhdgrow.XXXXXX)
+trap 'rm -rf "$STAGE"' EXIT
+
+[ $# -eq 2 ] || die "usage: vhdgrow <dm-name> <size|=size|--verify>"
+[ "$(id -u)" = 0 ] || die "must be root"
+NAME=$1
+
+read -r _ WINFILE MP < <(awk -v n="$NAME" '$1==n {print; exit}' "$CONF")
+[ -n "${WINFILE:-}" ] || die "$NAME not in $CONF"
+DEV=/dev/mapper/$NAME
+$DMS info "$NAME" >/dev/null 2>&1 || die "$NAME is not mapped"
+
+read -r LOOP LOFF < <(losetup -l -n -O NAME,OFFSET -j "$DEV" | head -1)
+[ -n "${LOOP:-}" ] || die "no loop device on $DEV"
+
+# partition to grow: the one that ends last, never "highest number"
+if [ "$LOFF" -gt 0 ]; then
+	PN=$(partx -g -o NR,START "$DEV" | awk -v o=$((LOFF / 512)) '$2==o {print $1; exit}')
+	FSDEV=$LOOP
+else
+	PN=$(partx -g -o NR,START,SECTORS "$DEV" \
+		| awk '{e=$2+$3; if (e>m) {m=e; n=$1}} END{print n}')
+	FSDEV=${LOOP}p${PN}
+fi
+[ -n "$PN" ] || die "cannot determine partition in $NAME"
+
+$DMS table "$NAME" > "$STAGE/old.table"
+awk '$3!="linear"{exit 1}' "$STAGE/old.table" || die "$NAME is not a pure linear map"
+TOK=$(awk '{print $4}' "$STAGE/old.table" | sort -u)
+[ "$(wc -l <<<"$TOK")" = 1 ] || die "mixed backing devices"
+CUR=$(( $(awk '{s+=$2} END{print s}' "$STAGE/old.table") * 512 ))
+
+# ---- signatures that must survive every table change -------------------------
+sig_dev() { dd if="$DEV" bs=512 count=2 status=none | md5sum | cut -d' ' -f1; }
+FSUUID=$(blkid -o value -s UUID "$FSDEV" 2>/dev/null || true)
+SIG=$(sig_dev)
+[ -n "$FSUUID" ] || die "cannot read filesystem UUID from $FSDEV"
+
+rollback() {
+	echo "vhdgrow: VERIFICATION FAILED - restoring previous table" >&2
+	$DMS suspend "$NAME" || true
+	$DMS reload  "$NAME" "$STAGE/old.table" || true
+	$DMS resume  "$NAME" || true
+	losetup -c "$LOOP" || true
+	exit 1
+}
+verify_mapping() {
+	losetup -c "$LOOP"
+	[ "$(sig_dev)" = "$SIG" ] || return 1
+	[ "$(blkid -o value -s UUID "$FSDEV" 2>/dev/null)" = "$FSUUID" ] || return 1
+	return 0
+}
+
+# ---- pull the file's real extents from the guest -----------------------------
+fetch_extents() {
+	BPC=$(ssh "$WINHOST" fsutil fsinfo ntfsinfo "$WINVOL" | tr -d '\r' \
+		| awk -F: 'tolower($0) ~ /bytes per cluster/ {
+			if (match($2, /[0-9]+/)) { print substr($2, RSTART, RLENGTH); exit } }')
+	[ -n "$BPC" ] && [ $((BPC % 512)) -eq 0 ] || die "cannot read cluster size"
+	ssh "$WINHOST" fsutil file queryextents "$WINFILE" | tr -d '\r' > "$STAGE/extents.txt"
+	awk -v spc=$((BPC / 512)) -v dev="$TOK" -v tot=$(( $1 / 512 )) '
+	function h2d(s,  i,c,v) { sub(/^0[xX]/,"",s); v=0
+		for(i=1;i<=length(s);i++){ c=tolower(substr(s,i,1))
+			v = v*16 + index("0123456789abcdef",c)-1 } return v }
+	/VCN:/ {
+		if ($6 !~ /^0[xX]/) { print "sparse extent" > "/dev/stderr"; exit 1 }
+		s=h2d($2)*spc; n=h2d($4)*spc; p=h2d($6)*spc
+		if (s >= tot) next
+		if (s + n > tot) n = tot - s
+		if (s != e) { print "hole in file" > "/dev/stderr"; exit 1 }
+		e = s + n
+		print s, n, "linear", dev, p
+	}
+	END { if (e != tot) { print "extents do not cover the file" > "/dev/stderr"; exit 1 } }
+	' "$STAGE/extents.txt" > "$STAGE/new.table"
+}
+
+# compare logical->physical over [0,lim) sectors; tolerant of merges and splits
+cmp_tables() {
+	awk -v lim="$3" '
+	FNR==NR { os[++on]=$1; ol[on]=$2; op[on]=$5; next }
+	{ ns[++nn]=$1; nl[nn]=$2; np[nn]=$5 }
+	END {
+		i=1; j=1; l=0
+		while (l < lim) {
+			while (i<=on && os[i]+ol[i] <= l) i++
+			while (j<=nn && ns[j]+nl[j] <= l) j++
+			if (i>on || j>nn) { print "coverage ends at sector", l > "/dev/stderr"; exit 1 }
+			if (os[i]>l || ns[j]>l) { print "hole at sector", l > "/dev/stderr"; exit 1 }
+			if (op[i]+(l-os[i]) != np[j]+(l-ns[j])) {
+				print "physical mismatch at logical sector", l > "/dev/stderr"; exit 1 }
+			oe=os[i]+ol[i]; ne=ns[j]+nl[j]
+			l = (oe<ne)?oe:ne
+			if (l>lim) l=lim
+		}
+	}' "$1" "$2"
+}
+
+# ---- --verify ----------------------------------------------------------------
+if [ "$2" = "--verify" ]; then
+	fetch_extents "$CUR"
+	if cmp_tables "$STAGE/old.table" "$STAGE/new.table" $((CUR / 512)); then
+		echo "vhdgrow: $NAME mapping matches the file ($(wc -l < "$STAGE/old.table") extents)"
+		exit 0
+	fi
+	die "$NAME mapping does NOT match the file - do not write to it"
+fi
+
+case "$2" in
+=*) NEW=$(numfmt --from=iec "${2#=}") || die "bad size" ;;
+ *) D=$(numfmt --from=iec "$2") || die "bad size"
+    NEW=$(( CUR + (D + 4095) / 4096 * 4096 )) ;;
+esac
+NEW=$(( NEW / 512 * 512 ))
+[ "$NEW" -ge "$CUR" ] || die "target $NEW is smaller than current $CUR"
+
+if [ "$NEW" -eq "$CUR" ]; then
+	echo "vhdgrow: $NAME already mapped at $NEW bytes - verifying, then resuming"
+	fetch_extents "$CUR"
+	cmp_tables "$STAGE/old.table" "$STAGE/new.table" $((CUR / 512)) \
+		|| die "live mapping does not match the file - refusing to resume"
+else
+	echo "vhdgrow: $NAME $CUR -> $NEW bytes (partition $PN, fs on $FSDEV)"
+
+	# guest allocates the clusters
+	PS=$(cat <<EOF
+\$ErrorActionPreference='Stop'
+try {
+  \$f='$WINFILE'
+  \$s=[System.IO.File]::Open(\$f,'Open','ReadWrite','None')
+  \$s.SetLength($NEW)
+  \$s.Close()
+  fsutil file setvaliddata \$f $NEW | Out-Null
+  fsutil volume flush $WINVOL | Out-Null
+} catch { Write-Error \$_; exit 1 }
+exit 0
+EOF
+	)
+	ENC=$(printf '%s' "$PS" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+	ssh "$WINHOST" powershell -NoProfile -NonInteractive -EncodedCommand "$ENC" \
+		|| die "guest extend failed"
+
+	GOT=$(ssh "$WINHOST" powershell -NoProfile -NonInteractive -Command \
+		"(Get-Item '$WINFILE').Length" | tr -d '\r ')
+	[ "$GOT" = "$NEW" ] || die "guest file is $GOT bytes, expected $NEW"
+
+	fetch_extents "$NEW"
+	cmp_tables "$STAGE/old.table" "$STAGE/new.table" $((CUR / 512)) \
+		|| die "existing extents moved - refusing to reload"
+
+	# guard the new region before the guest can touch it
+	if $DMS info guestdisk >/dev/null 2>&1; then
+		GLOOP=$(resolve "$($DMS table guestdisk | awk '$3=="linear"{print $4; exit}')")
+		/usr/local/sbin/guestdisk-table "$NAME=$STAGE/new.table" > "$STAGE/gd.raw"
+		sed "s| linear /dev/nvme0n1 | linear $GLOOP |" "$STAGE/gd.raw" > "$STAGE/gd.table"
+		awk '$3=="error"{s+=$2} END{exit !(s>0)}' "$STAGE/gd.table" \
+			|| die "guard table protects nothing"
+		VMRESUME=0
+		if virsh domstate "$DOMAIN" 2>/dev/null | grep -q running; then
+			virsh suspend "$DOMAIN"; VMRESUME=1
+		fi
+		$DMS suspend guestdisk
+		$DMS reload  guestdisk "$STAGE/gd.table"
+		$DMS resume  guestdisk
+                cp -f "$STAGE/gd.table" /run/guestdisk.table
+		[ "$VMRESUME" = 1 ] && virsh resume "$DOMAIN"
+	fi
+
+	$DMS suspend "$NAME"
+	$DMS reload  "$NAME" "$STAGE/new.table"
+	$DMS resume  "$NAME"
+
+	verify_mapping || rollback
+	echo "vhdgrow: mapping verified after reload"
+fi
+
+losetup -c "$LOOP"
+
+# ---- grow the partition, then the filesystem ---------------------------------
+sgdisk -e "$DEV" >/dev/null
+echo ", +" | sfdisk -N "$PN" --force "$DEV"
+PSECT=$(partx -g -o SECTORS -n "$PN" "$DEV" | tr -d ' ')
+[ -n "$PSECT" ] || die "cannot read partition $PN size"
+
+blockdev --flushbufs "$LOOP"
+[ "$LOFF" -gt 0 ] || partx -u "$LOOP"
+
+FSTYPE=$(blkid -o value -s TYPE "$FSDEV" || true)
+case "$FSTYPE" in
+ext2|ext3|ext4)
+	BS=$(dumpe2fs -h "$FSDEV" 2>/dev/null | awk -F: '/Block size/{gsub(/ /,"",$2);print $2}')
+	resize2fs "$FSDEV" $(( PSECT * 512 / BS ))
+	;;
+xfs)
+	findmnt -n -S "$FSDEV" >/dev/null || die "xfs must be mounted to grow"
+	xfs_growfs "$(findmnt -n -o TARGET -S "$FSDEV")"
+	;;
+*)
+	die "unsupported filesystem on $FSDEV: ${FSTYPE:-none}"
+	;;
+esac
+
+"$RAW2VHD" -e $((NEW - 512)) > "$STAGE/footer.bin"
+dd if="$STAGE/footer.bin" of="$DEV" bs=512 seek=$((NEW / 512 - 1)) count=1 \
+	conv=fsync status=none
+blockdev --flushbufs "$DEV"
+
+echo "vhdgrow: done"
+[ -n "${MP:-}" ] && df -h "$MP" | awk 'NR==2{print "  "$2" total, "$4" free"}'
+

@@ -60,7 +60,7 @@ uki/debian.efi: uki init.cpio cache/debian.vhd
 uki:
 	mkdir -p uki
 
-init.cpio: fs/init fs/lnc/setdio fs/lnc/busybox fs/lnc/musl.so fs/lnc/bootstrap
+init.cpio: fs/init fs/lnc/setdio fs/lnc/busybox fs/lnc/musl.so fs/lnc/bootstrap fs/lnc/dmimage
 	mkdir -p fs/dev
 	mkdir -p fs/proc
 	mkdir -p fs/sys
@@ -68,6 +68,9 @@ init.cpio: fs/init fs/lnc/setdio fs/lnc/busybox fs/lnc/musl.so fs/lnc/bootstrap
 
 fs/lnc/bootstrap: bootstrap/bootstrap.c
 	make -C bootstrap
+
+fs/lnc/dmimage: dmimage/dmimage.c
+	make -C dmimage
 
 fs/init: init
 	mkdir -p fs
@@ -91,9 +94,9 @@ fs/lnc/busybox: cache/busybox.tar.gz
 	python3 bswap $@ "libc.musl-x86_64.so.1" "/lnc/musl.so"
 
 cache/debian.vhd: | cache
-	wget https://cdimage.debian.org/cdimage/cloud/trixie/20260722-2547/debian-13-nocloud-amd64-20260722-2547.raw -O $@
+	wget http://host/cdimage/cloud/trixie/20260722-2547/debian-13-nocloud-amd64-20260722-2547.raw -O $@
 	python3 bswap $@ "root:!unprovisioned:" "root:ab6TRGT20sY26:0"
-	python3 raw2vhd $@
+	python3 scripts/usr/local/sbin/raw2vhd $@
 	mkdir -p mnt; \
 	LOOPDEV=$$(losetup --find --show --partscan --direct-io=on $@); \
 	trap 'umount -R mnt 2>/dev/null || true; \
@@ -121,6 +124,7 @@ deps:
 clean:
 	umount -R mnt || true
 	make -C bootstrap clean
+	make -C dmimage clean
 	rm -rf fs init.cpio esp uki mnt cache
 
 FORCE: ;

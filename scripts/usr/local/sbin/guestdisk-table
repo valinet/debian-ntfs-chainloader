@@ -1,0 +1,68 @@
+#!/bin/bash
+# guestdisk-table [name=tablefile ...]
+# Emit the guest's view of the whole disk, with every mapped image's extents
+# set to 'error'. Named overrides substitute a table file for the live one.
+set -euo pipefail
+
+CONF=/etc/vhdimages.conf
+declare -A OVR
+for a in "$@"; do OVR["${a%%=*}"]="${a#*=}"; done
+
+TBL=
+while read -r name _; do
+	case "$name" in ''|\#*) continue ;; esac
+	if [ -n "${OVR[$name]:-}" ]; then
+		T=$(cat "${OVR[$name]}")
+	else
+		dmsetup info "$name" >/dev/null 2>&1 || continue
+		T=$(dmsetup table "$name")
+	fi
+	# refuse anything that is not a pure linear mapping
+	if awk 'NF && $3!="linear" {exit 1}' <<<"$T"; then
+		TBL+="$T"$'\n'
+	else
+		echo "guestdisk-table: $name has non-linear targets, refusing" >&2
+		exit 1
+	fi
+done < "$CONF"
+[ -n "$TBL" ] || { echo "guestdisk-table: no mapped images" >&2; exit 1; }
+
+TOK=$(awk 'NF{print $4}' <<<"$TBL" | sort -u)
+[ "$(wc -l <<<"$TOK")" = 1 ] || { echo "guestdisk-table: mixed backing devices" >&2; exit 1; }
+case "$TOK" in
+	/dev/*) PARTDEV="$TOK" ;;
+	*)      PARTDEV=/dev/$(basename "$(readlink -f "/sys/dev/block/$TOK")") ;;
+esac
+
+PN=$(basename "$PARTDEV")
+PSTART=$(cat "/sys/class/block/$PN/start")
+DISK=/dev/$(basename "$(readlink -f "/sys/class/block/$PN/..")")
+DSIZE=$(blockdev --getsz "$DISK")
+
+awk -v ps="$PSTART" -v disk="$DISK" -v dsz="$DSIZE" '
+NF { c++; s[c] = $5 + ps; l[c] = $2 }
+END {
+	n = c
+	for (i = 2; i <= n; i++) {
+		a = s[i]; b = l[i]; j = i - 1
+		while (j > 0 && s[j] > a) { s[j+1] = s[j]; l[j+1] = l[j]; j-- }
+		s[j+1] = a; l[j+1] = b
+	}
+	# merge adjacent/overlapping protected ranges
+	m = 0
+	for (i = 1; i <= n; i++) {
+		if (m > 0 && s[i] <= ms[m] + ml[m]) {
+			e = s[i] + l[i]
+			if (e > ms[m] + ml[m]) ml[m] = e - ms[m]
+		} else {
+			m++; ms[m] = s[i]; ml[m] = l[i]
+		}
+	}
+	p = 0
+	for (i = 1; i <= m; i++) {
+		if (ms[i] > p) print p, ms[i] - p, "linear", disk, p
+		print ms[i], ml[i], "error"
+		p = ms[i] + ml[i]
+	}
+	if (p < dsz) print p, dsz - p, "linear", disk, p
+}' <<<"$TBL"
