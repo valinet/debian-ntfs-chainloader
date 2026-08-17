@@ -94,7 +94,7 @@ fs/lnc/busybox: cache/busybox.tar.gz
 	python3 bswap $@ "libc.musl-x86_64.so.1" "/lnc/musl.so"
 
 cache/debian.vhd: | cache
-	wget http://host/cdimage/cloud/trixie/20260722-2547/debian-13-nocloud-amd64-20260722-2547.raw -O $@
+	wget http://cloud.debian.org/cdimage/cloud/trixie/20260722-2547/debian-13-nocloud-amd64-20260722-2547.raw -O $@
 	python3 bswap $@ "root:!unprovisioned:" "root:ab6TRGT20sY26:0"
 	python3 scripts/usr/local/sbin/raw2vhd $@
 	mkdir -p mnt; \
